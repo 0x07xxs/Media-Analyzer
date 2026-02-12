@@ -1,12 +1,20 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
 import { getFingerprint } from "@/lib/fingerprint";
 
 type SummaryOption = {
   id: "brief" | "detailed" | "bullets" | "action";
   label: string;
   helper: string;
+};
+
+type User = {
+  id: string;
+  email: string;
+  name: string | null;
+  uploadCount?: number;
 };
 
 const SUMMARY_OPTIONS: SummaryOption[] = [
@@ -33,6 +41,7 @@ const SUMMARY_OPTIONS: SummaryOption[] = [
 ];
 
 export default function Home() {
+  const router = useRouter();
   const [file, setFile] = useState<File | null>(null);
   const [summaryType, setSummaryType] =
     useState<SummaryOption["id"]>("brief");
@@ -45,21 +54,55 @@ export default function Home() {
   const [fingerprint, setFingerprint] = useState<string | null>(null);
   const [remaining, setRemaining] = useState<number | null>(null);
   const [limitReached, setLimitReached] = useState(false);
+  const [user, setUser] = useState<User | null>(null);
+  const [userLoading, setUserLoading] = useState(true);
 
-  // Load fingerprint silently on mount
+  // Load current user on mount
   useEffect(() => {
-    getFingerprint().then(setFingerprint).catch(() => {});
+    fetch("/api/auth/me")
+      .then((res) => res.json())
+      .then((data) => {
+        if (data.user) {
+          setUser(data.user);
+        }
+      })
+      .catch(() => {})
+      .finally(() => setUserLoading(false));
   }, []);
 
+  // Load fingerprint silently on mount (only if not logged in)
+  useEffect(() => {
+    if (!user) {
+      getFingerprint().then(setFingerprint).catch(() => {});
+    }
+  }, [user]);
+
+  const handleLogout = async () => {
+    try {
+      await fetch("/api/auth/logout", { method: "POST" });
+      setUser(null);
+      setRemaining(null);
+      setLimitReached(false);
+      router.refresh();
+    } catch {
+      // ignore
+    }
+  };
+
   const isBusy = status !== "idle";
+  const isLoggedIn = !!user;
+
   const statusLabel = useMemo(() => {
     if (status === "transcribing") return "Transcribing video…";
     if (status === "summarizing") return "Summarizing with Opus 4.5…";
+    if (isLoggedIn) {
+      return "Ready to transcribe · Unlimited uploads";
+    }
     if (remaining !== null && remaining > 0) {
       return `Ready to transcribe · ${remaining} free upload${remaining === 1 ? "" : "s"} remaining`;
     }
     return "Ready to transcribe";
-  }, [status, remaining]);
+  }, [status, remaining, isLoggedIn]);
 
   const selectedOption = SUMMARY_OPTIONS.find(
     (option) => option.id === summaryType
@@ -112,12 +155,17 @@ export default function Home() {
         transcript: string;
         remaining?: number;
         used?: number;
+        unlimited?: boolean;
       };
 
       setTranscript(transcribePayload.transcript);
       
-      // Update remaining count
-      if (typeof transcribePayload.remaining === "number") {
+      // Update remaining count (only for non-logged-in users)
+      if (transcribePayload.unlimited) {
+        // Logged-in user, no limit
+        setRemaining(null);
+        setLimitReached(false);
+      } else if (typeof transcribePayload.remaining === "number") {
         setRemaining(transcribePayload.remaining);
         if (transcribePayload.remaining === 0) {
           setLimitReached(true);
@@ -227,10 +275,10 @@ export default function Home() {
                 <button
                   type="button"
                   onClick={handleSubmit}
-                  disabled={isBusy || !file || limitReached}
+                  disabled={isBusy || !file || (limitReached && !isLoggedIn)}
                   className="rounded-full bg-zinc-900 px-6 py-3 text-sm font-semibold text-white transition hover:bg-zinc-800 disabled:cursor-not-allowed disabled:bg-zinc-400"
                 >
-                  {limitReached
+                  {limitReached && !isLoggedIn
                     ? "Limit reached"
                     : isBusy
                     ? "Working..."
@@ -238,7 +286,7 @@ export default function Home() {
                 </button>
               </div>
 
-              {limitReached ? (
+              {limitReached && !isLoggedIn ? (
                 <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-4 text-sm">
                   <p className="font-semibold text-amber-800">
                     You&apos;ve used all 10 free uploads
@@ -249,10 +297,7 @@ export default function Home() {
                   <button
                     type="button"
                     className="mt-3 rounded-full bg-amber-600 px-5 py-2 text-sm font-semibold text-white transition hover:bg-amber-700"
-                    onClick={() => {
-                      // TODO: Navigate to signup page
-                      alert("Sign up flow coming soon!");
-                    }}
+                    onClick={() => router.push("/signup")}
                   >
                     Create free account
                   </button>
@@ -266,6 +311,63 @@ export default function Home() {
           </div>
 
           <aside className="flex flex-col gap-4 rounded-2xl border border-zinc-200 bg-white p-6 shadow-sm">
+            {/* User status section */}
+            {userLoading ? (
+              <div className="rounded-xl border border-zinc-100 bg-zinc-50 px-4 py-4">
+                <p className="text-sm text-zinc-500">Loading...</p>
+              </div>
+            ) : isLoggedIn ? (
+              <div className="rounded-xl border border-emerald-100 bg-gradient-to-br from-emerald-50 to-emerald-100/50 px-4 py-4">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="flex-1">
+                    <p className="text-sm font-medium text-emerald-800">
+                      {user.name || user.email}
+                    </p>
+                    <p className="mt-0.5 text-xs text-emerald-600">
+                      Unlimited uploads enabled
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleLogout}
+                    className="shrink-0 rounded-full border border-emerald-300 bg-white px-4 py-1.5 text-xs font-semibold text-emerald-700 transition hover:border-emerald-400 hover:bg-emerald-50"
+                  >
+                    Log out
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="rounded-xl border border-zinc-100 bg-gradient-to-br from-zinc-50 to-zinc-100/50 px-4 py-4">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="flex-1">
+                    <p className="text-sm font-medium text-zinc-800">
+                      Have an account?
+                    </p>
+                    <p className="mt-0.5 text-xs text-zinc-500">
+                      Log in for unlimited uploads and history.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => router.push("/login")}
+                    className="shrink-0 rounded-full border border-zinc-300 bg-white px-4 py-1.5 text-xs font-semibold text-zinc-700 transition hover:border-zinc-400 hover:bg-zinc-50"
+                  >
+                    Log in
+                  </button>
+                </div>
+                <div className="mt-3 flex items-center gap-2 border-t border-zinc-200/60 pt-3">
+                  <span className="text-xs text-zinc-500">New here?</span>
+                  <button
+                    type="button"
+                    onClick={() => router.push("/signup")}
+                    className="text-xs font-semibold text-zinc-700 underline underline-offset-2 hover:text-zinc-900"
+                  >
+                    Create free account
+                  </button>
+                </div>
+              </div>
+            )}
+
             <div className="flex flex-col gap-2">
               <h2 className="text-base font-semibold text-zinc-900">
                 Current selection
@@ -279,7 +381,7 @@ export default function Home() {
             </div>
             <div className="rounded-xl bg-zinc-50 px-4 py-3 text-xs text-zinc-500">
               Output is generated from your transcript and summarized by Opus
-              4.5. Configure API keys in <code>.env.local</code>.
+              4.5. {isLoggedIn ? "You have unlimited uploads." : "Logged-in users get unlimited uploads."}
             </div>
           </aside>
         </section>

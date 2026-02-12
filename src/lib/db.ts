@@ -38,6 +38,132 @@ export async function initDatabase() {
       INDEX idx_fingerprint (fingerprint)
     )
   `);
+
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS users (
+      id VARCHAR(36) PRIMARY KEY,
+      email VARCHAR(255) NOT NULL UNIQUE,
+      password_hash VARCHAR(255) NOT NULL,
+      name VARCHAR(100),
+      upload_count INT DEFAULT 0,
+      visitor_id VARCHAR(36),
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      last_login_at TIMESTAMP NULL,
+      INDEX idx_email (email),
+      INDEX idx_visitor_id (visitor_id)
+    )
+  `);
+}
+
+// ============== USER FUNCTIONS ==============
+
+export type User = {
+  id: string;
+  email: string;
+  name: string | null;
+  uploadCount: number;
+  createdAt: Date;
+};
+
+export async function createUser(
+  email: string,
+  passwordHash: string,
+  name?: string,
+  visitorId?: string
+): Promise<User> {
+  const db = getPool();
+  const id = crypto.randomUUID();
+
+  // If linking to a visitor, get their upload count to transfer
+  let transferCount = 0;
+  if (visitorId) {
+    const [visitorRows] = await db.execute<mysql.RowDataPacket[]>(
+      "SELECT upload_count FROM visitors WHERE id = ?",
+      [visitorId]
+    );
+    if (visitorRows.length > 0) {
+      transferCount = visitorRows[0].upload_count;
+    }
+  }
+
+  await db.execute(
+    `INSERT INTO users (id, email, password_hash, name, upload_count, visitor_id) 
+     VALUES (?, ?, ?, ?, ?, ?)`,
+    [id, email.toLowerCase(), passwordHash, name || null, transferCount, visitorId || null]
+  );
+
+  return {
+    id,
+    email: email.toLowerCase(),
+    name: name || null,
+    uploadCount: transferCount,
+    createdAt: new Date(),
+  };
+}
+
+export async function getUserByEmail(email: string): Promise<(User & { passwordHash: string }) | null> {
+  const db = getPool();
+
+  const [rows] = await db.execute<mysql.RowDataPacket[]>(
+    "SELECT id, email, password_hash, name, upload_count, created_at FROM users WHERE email = ?",
+    [email.toLowerCase()]
+  );
+
+  if (rows.length === 0) return null;
+
+  const row = rows[0];
+  return {
+    id: row.id,
+    email: row.email,
+    passwordHash: row.password_hash,
+    name: row.name,
+    uploadCount: row.upload_count,
+    createdAt: row.created_at,
+  };
+}
+
+export async function getUserById(id: string): Promise<User | null> {
+  const db = getPool();
+
+  const [rows] = await db.execute<mysql.RowDataPacket[]>(
+    "SELECT id, email, name, upload_count, created_at FROM users WHERE id = ?",
+    [id]
+  );
+
+  if (rows.length === 0) return null;
+
+  const row = rows[0];
+  return {
+    id: row.id,
+    email: row.email,
+    name: row.name,
+    uploadCount: row.upload_count,
+    createdAt: row.created_at,
+  };
+}
+
+export async function incrementUserUpload(userId: string): Promise<number> {
+  const db = getPool();
+
+  await db.execute(
+    "UPDATE users SET upload_count = upload_count + 1 WHERE id = ?",
+    [userId]
+  );
+
+  const [rows] = await db.execute<mysql.RowDataPacket[]>(
+    "SELECT upload_count FROM users WHERE id = ?",
+    [userId]
+  );
+
+  return rows[0]?.upload_count ?? 0;
+}
+
+export async function updateLastLogin(userId: string): Promise<void> {
+  const db = getPool();
+  await db.execute(
+    "UPDATE users SET last_login_at = CURRENT_TIMESTAMP WHERE id = ?",
+    [userId]
+  );
 }
 
 export async function getOrCreateVisitor(

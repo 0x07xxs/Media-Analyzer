@@ -12,8 +12,10 @@ import {
   getOrCreateVisitor,
   canUpload,
   incrementUpload,
+  incrementUserUpload,
   FREE_UPLOAD_LIMIT,
 } from "@/lib/db";
+import { getCurrentUserId } from "@/lib/auth";
 
 export const runtime = "nodejs";
 export const maxDuration = 900;
@@ -173,45 +175,56 @@ export async function POST(request: Request) {
     }
   }
 
-  // Get visitor identification
+  // Check if user is logged in (authenticated users have unlimited uploads)
+  let loggedInUserId: string | null = null;
+  try {
+    loggedInUserId = await getCurrentUserId();
+  } catch {
+    // Not logged in, continue as visitor
+  }
+
+  // For non-logged-in users, check visitor limits
   const cookieStore = await cookies();
   const visitorCookie = cookieStore.get("visitor_id")?.value || null;
   const fingerprint = request.headers.get("x-fingerprint") || null;
 
-  // Look up or create visitor
-  let visitor: { id: string; uploadCount: number; isNew: boolean };
-  try {
-    visitor = await getOrCreateVisitor(visitorCookie, fingerprint);
-  } catch (dbError) {
-    console.error("Visitor lookup failed:", dbError);
-    return NextResponse.json(
-      { error: "Database error." },
-      { status: 500 }
-    );
-  }
+  let visitor: { id: string; uploadCount: number; isNew: boolean } | null = null;
 
-  // Check usage limit
-  const usage = await canUpload(visitor.id);
-  if (!usage.allowed) {
-    const response = NextResponse.json(
-      {
-        error: "limit_reached",
-        message: `You've used all ${FREE_UPLOAD_LIMIT} free uploads. Create an account to continue.`,
-        used: usage.used,
-        remaining: 0,
-      },
-      { status: 403 }
-    );
-    // Still set cookie for new visitors even when blocked
-    if (visitor.isNew) {
-      response.cookies.set("visitor_id", visitor.id, {
-        httpOnly: true,
-        secure: process.env.NODE_ENV === "production",
-        sameSite: "lax",
-        maxAge: 60 * 60 * 24 * 365, // 1 year
-      });
+  if (!loggedInUserId) {
+    // Look up or create visitor
+    try {
+      visitor = await getOrCreateVisitor(visitorCookie, fingerprint);
+    } catch (dbError) {
+      console.error("Visitor lookup failed:", dbError);
+      return NextResponse.json(
+        { error: "Database error." },
+        { status: 500 }
+      );
     }
-    return response;
+
+    // Check usage limit for visitors only
+    const usage = await canUpload(visitor.id);
+    if (!usage.allowed) {
+      const response = NextResponse.json(
+        {
+          error: "limit_reached",
+          message: `You've used all ${FREE_UPLOAD_LIMIT} free uploads. Create an account to continue.`,
+          used: usage.used,
+          remaining: 0,
+        },
+        { status: 403 }
+      );
+      // Still set cookie for new visitors even when blocked
+      if (visitor.isNew) {
+        response.cookies.set("visitor_id", visitor.id, {
+          httpOnly: true,
+          secure: process.env.NODE_ENV === "production",
+          sameSite: "lax",
+          maxAge: 60 * 60 * 24 * 365, // 1 year
+        });
+      }
+      return response;
+    }
   }
 
   const formData = await request.formData();
@@ -280,17 +293,33 @@ export async function POST(request: Request) {
     }
 
     // Increment upload count after successful transcription
-    const newCount = await incrementUpload(visitor.id);
-    const remaining = Math.max(0, FREE_UPLOAD_LIMIT - newCount);
+    let responseData: { transcript: string; used?: number; remaining?: number; unlimited?: boolean };
 
-    const response = NextResponse.json({
-      transcript: safeTranscript,
-      used: newCount,
-      remaining,
-    });
+    if (loggedInUserId) {
+      // Logged-in user: unlimited uploads, just track count
+      const newCount = await incrementUserUpload(loggedInUserId);
+      responseData = {
+        transcript: safeTranscript,
+        used: newCount,
+        unlimited: true,
+      };
+    } else if (visitor) {
+      // Visitor: limited uploads
+      const newCount = await incrementUpload(visitor.id);
+      const remaining = Math.max(0, FREE_UPLOAD_LIMIT - newCount);
+      responseData = {
+        transcript: safeTranscript,
+        used: newCount,
+        remaining,
+      };
+    } else {
+      responseData = { transcript: safeTranscript };
+    }
+
+    const response = NextResponse.json(responseData);
 
     // Set cookie for new visitors
-    if (visitor.isNew) {
+    if (visitor?.isNew) {
       response.cookies.set("visitor_id", visitor.id, {
         httpOnly: true,
         secure: process.env.NODE_ENV === "production",
